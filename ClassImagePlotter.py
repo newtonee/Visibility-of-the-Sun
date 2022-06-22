@@ -4,7 +4,11 @@ import warnings
 import numpy as np
 from numpy import linalg as LA
 import pandas as pd
-import swifter
+from os import listdir
+from os.path import isfile, join
+
+from progress.bar import IncrementalBar
+from tqdm import tqdm
 
 # time
 from datetime import timezone, timedelta, datetime
@@ -103,6 +107,16 @@ class image_plotter:
         s = self.start_date[5]
         return Y, M, D, h, m, s
 
+    def decode_date(self, date):
+        Y = date[0]
+        M = date[1]
+        D = date[2]
+        h = date[3]
+        m = date[4]
+        s = date[5]
+        return Y, M, D, h, m, s
+
+
     def decode_period(self):
         dD = self.T[0]
         dh = self.T[1]
@@ -136,6 +150,18 @@ class image_plotter:
         pos = self.earth.at(t).observe(self.sun).apparent().position.m
         return pos
 
+    def get_sat_position_and_subpoint_fast(self):
+        t = self.ts.utc(self.df["Date"])
+        geocentric = self.df["sat"][0].at(t) # ошибка
+        pos = geocentric.position.m
+        pos = pos.T
+        pos = np.split(pos, len(pos))
+        self.df["sat_pos"] = pos
+        subpoint = geocentric.subpoint()
+        subpoint = np.array([self.convert_angle(subpoint.latitude),
+                             self.convert_angle(subpoint.longitude), subpoint.elevation.m])
+        self.df["sat_subpoint"] = np.split(subpoint.T, len(subpoint.T))
+
     def get_sat_position_and_subpoint(self, row):  # get position of sat
         # and its current latitude, longitude and elevation
         t = self.ts.utc(row["Date"])
@@ -152,23 +178,44 @@ class image_plotter:
         pos = geocentric.position.m
         return pos
 
+    # def cut_sat_archive(self):
+    #     t = self.df["Date"]
+    #     sat =
+    #
+    #     return sat
+
+
     def get_positions(self):
         self.df["closest TLE date"] = None
         self.df["sat"] = None
 
-        self.df = self.df.swifter.apply(self.get_sat_for_date, axis=1)
+        # self.sat = self.cut_sat_archive()
+
+        self.df = self.df.apply(self.get_sat_for_date, axis=1)
+        # self.get_sat_for_date_fast()
+
         if self.sat_subpoint:
-            self.df = self.df.swifter.apply(self.get_sat_position_and_subpoint, axis=1)
+            self.df = self.df.apply(self.get_sat_position_and_subpoint, axis=1)
+            # self.get_sat_position_and_subpoint_fast()
         else:
-            self.df["sat_pos"] = self.df.swifter.apply(self.get_sat_position, axis=1)
-        self.df["sun_pos"] = self.df.swifter.apply(self.get_sun_position, axis=1)
-        self.df["sat_to_sun"] = self.df["sun_pos"] - self.df["sat_pos"]  # vector between the sat and the Sun,
-        # pointing to the Sun
-        self.df = self.df.swifter.apply(self.get_WGS84_R_Earth, axis=1)
+            self.df["sat_pos"] = self.df.apply(self.get_sat_position, axis=1)
+
+        self.df["sun_pos"] = self.df.apply(self.get_sun_position, axis=1)
+        self.df["sat_to_sun"] = self.df["sun_pos"] - self.df["sat_pos"]  # vector between the sat and the Sun, pointing to the Sun
+        self.df = self.df.apply(self.get_WGS84_R_Earth, axis=1)
 
     def get_nearest_datetime(self, items, pivot):
         nearest_datetime = min(items, key=lambda x: abs(x - pivot))
         return nearest_datetime
+
+    def get_sat_for_date_fast(self):
+        t = self.df["Date"]
+        t = pd.to_datetime(t)  # t.to_pydatetime()
+        t = np.array(t)
+        tle_dates = np.array(list(self.sat.keys()))
+        tle_dates_indexes = np.argmin(abs(t.reshape(-1, 1) - tle_dates), axis=1)
+        self.df["closest TLE date"] = list(map(list(self.sat.keys()).__getitem__, tle_dates_indexes))
+        self.df["sat"] = list(map(list(self.sat.values()).__getitem__, tle_dates_indexes))
 
     def get_sat_for_date(self, row):
         t = row["Date"]
@@ -183,10 +230,10 @@ class image_plotter:
             raise TypeError('Incorrect type of self.sat')
         return row
 
-    def calculate_visibility(self):  # compute if sun is visible for whole dataframe
+    def calculate_visibility(self):  # compute if sun is visible for the whole dataframe
         print("Shape of dataframe before determining if the Sun is visible is", self.df.shape)
-        self.df = self.df.swifter.apply(self.get_horizont_earth_radius, axis=1)
-        self.df["sun_vis"] = self.df.swifter.apply(self.sun_is_visible, axis=1)
+        self.df = self.df.apply(self.get_horizont_earth_radius, axis=1)
+        self.df["sun_vis"] = self.df.apply(self.sun_is_visible, axis=1)
         if self.full_sun:
             self.df = self.df[self.df["sun_vis"] == 1]
         else:
@@ -313,8 +360,8 @@ class image_plotter:
 
     def get_beam_path(self, num_points=50):  # generate point lying on beam path
         # get vectors, pointing to the entry to atm and to the exit from atm of light beam
-        self.df["entry_vec"] = self.df.swifter.apply(self.get_entry_vec, axis=1)
-        self.df["exit_vec"] = self.df.swifter.apply(self.get_exit_vec, axis=1)
+        self.df["entry_vec"] = self.df.apply(self.get_entry_vec, axis=1)
+        self.df["exit_vec"] = self.df.apply(self.get_exit_vec, axis=1)
         self.df = self.df.dropna()
 
         # get points forming light trajectory
@@ -322,7 +369,7 @@ class image_plotter:
             "entry_vec"]  # оба имеют макс. высоту в h[1]. При этом на их же концах и есть наибольшая ошибка
         self.df["num_points"] = num_points
         self.df["diff"] /= self.df["num_points"]
-        self.df = self.df.swifter.apply(self.beam_path_points_with_subpoints, axis=1)
+        self.df = self.df.apply(self.beam_path_points_with_subpoints, axis=1)
 
         # clean data
         self.df.drop(columns=["diff"])
@@ -547,23 +594,43 @@ class image_plotter:
         # showing
         plt.show()
 
+    def try_to_calculate_and_save(self, foldername, date):
+        sat = self.sat
+        image_plotter_instance = image_plotter(sat, self.sun, self.earth, dt=self.dt, T=[1, 0, 0, 0], h=[self.h[0] / 1e3, self.h[1] / 1e3],
+                           start_date=date,
+                           sat_subpoint=True, full_sun=False);
+        try:
+            print(date, " calculation has started")
+            image_plotter_instance.__call__()
+            image_plotter_instance.df.drop("sat", axis=1).to_pickle(foldername + "/" + str(date) + ".pkl")
+            file_object = open('days_with_flybys.txt', 'a')
+            file_object.write(str(date) + "\n")
+        except:
+            print(date, " has no any flybys")
+            file_object = open('days_without_flybys.txt', 'a')
+            file_object.write(str(date) + "\n")
+        file_object.close()
+        clear_output()
+        print(date, "done")
+        del image_plotter_instance
+
+    def calculate_absent_dates(self, absent_dates, foldername="pkls"):
+        for date in absent_dates:
+            # date = [date.year, date.month, date.day, date.hour, date.minute, date.second]
+            self.try_to_calculate_and_save(foldername, date)
+
     def calculate_and_save_every_day(self, start, total_days, foldername="pkls"):
         days = range(total_days)
         for dday in days:
             delta_t = timedelta(days=dday)
             date = start + delta_t
             date = [date.year, date.month, date.day, date.hour, date.minute, date.second]
-            ip = image_plotter(self.sat, sun, earth, dt=self.dt, T=[0, 1, 0, 0], h=[self.h[0]/1e3, self.h[1]/1e3], start_date=date,
-                               sat_subpoint=True, full_sun=False);
-            ip();
-            ip.df.drop("sat", axis=1).to_pickle(foldername + "/" + str(date) + ".pkl")
-            clear_output()
-            print(date, "done")
+            self.try_to_calculate_and_save(foldername, date)
 
     def read_df(self, df):
         self.df = df
 
-    def plot_duration(self, df_indexes=None):
+    def plot_duration(self, df_indexes=None, ylims=[10, 1000], log_scale=True):
         a = self.get_flyby_info(plot=False)
         if df_indexes is None: # если график можно рисовать непрерывно
             df = [a]
@@ -582,13 +649,50 @@ class image_plotter:
         ax.yaxis.set_label_position("right")
         ax.yaxis.tick_right()
         # ax.yaxis.label_right()
-        ax.set_ylim([10, 1000])
-        ax.set_yscale("log")
+        ax.set_ylim(ylims)
+        if log_scale : ax.set_yscale("log")
 
         ax.grid(b=True, which='major', color='gray', linestyle='-', linewidth=1, alpha=0.5)
         ax.grid(b=True, which='minor', color='gray', linestyle='-', linewidth=1, alpha=0.1)
         plt.savefig('Duration_5-50km.png', dpi=600)
         plt.show()
+
+    def find_absent_dates(self, start, total_days=365, days_with_fbs_file="days_with_flybys.txt"):
+        txt_file = open(days_with_fbs_file, "r")
+        existing_dates = [string.replace('\n',"") for string in txt_file.readlines()]
+
+        required_dates = []
+        days = range(total_days)
+        for dday in days:
+            delta_t = timedelta(days=dday)
+            date = start + delta_t
+            date = [date.year, date.month, date.day, date.hour, date.minute, date.second]
+            required_dates.append(str(date))
+
+        absent_dates = list(set(required_dates) - set(existing_dates))# + list(set(li2) - set(li1))
+        for i, date in enumerate(absent_dates):
+            date = date.split()
+            date = [int(''.join(filter(str.isdigit, ddate))) for ddate in date]
+            absent_dates[i] = date
+
+        return absent_dates
+
+    def save_big_dataframe(self, filename, pkls_archive_path="pkls"):
+        onlyfiles = [f for f in listdir(pkls_archive_path) if isfile(join(pkls_archive_path, f))]
+        small_files = []
+        for file in tqdm(onlyfiles, desc="small files reading"):
+            small_files.append(pd.read_pickle(pkls_archive_path + "/" + file))
+        print("concatenating")
+        big_df = pd.concat(small_files)
+        print("big file has been concatenated")
+        del small_files
+        print("sorting")
+        big_df = big_df.sort_values(by="Date")
+        print("big file has been sorted")
+        print("saving")
+        big_df.to_pickle(filename)
+        print("file has been saved")
+        return
 
 
 if __name__ == "__main__":
@@ -597,38 +701,46 @@ if __name__ == "__main__":
     # iss = satellites['ISS (ZARYA)']
     # print(iss)
 
+    tle_parser = TLEArchiveParser("tianhe_tle_archive_parsed", "Tianhe_TLE.txt")
+    tles = tle_parser()
+
     planets = load('de421.bsp')
     sun = planets['sun']
     earth = planets['earth']
 
 
-    # # ЕСЛИ ЧИТАЕШЬ СТАРЫЙ ФАЙЛ
-    # ip = image_plotter(tles, sun, earth, dt=1, T=[0, 0, 11, 0], h=[5, 50], start_date=[2020, 5, 15, 12, 36, 35],
-    #                    sat_subpoint=True, full_sun=False)
-    # big_df = pd.read_pickle("2019-10-10_2020-10-08_dt1.pkl")
-    # ip.read_df(big_df) # пример большого файла
-    #
-    # # # пример с выделением кусочка из большого файла
-    # # tz = timezone(timedelta(hours=0))  # whatever your timezone offset from UTC is
-    # # fb_df = big_df[(big_df["Date"] >= datetime(2020, 4, 15, 0, 0, 0, tzinfo=tz)) &
-    # #                (big_df["Date"] <= datetime(2020, 4, 16, 0, 0, 0, tzinfo=tz))]
-    # # # fb_df.iloc[::30, :]
-    # # ip.read_df(fb_df)
-    #
-    # # a = ip.get_flyby_info(plot=True)
-    # ip.plot_duration() # нарисовать график длительности пролетов в зависимости от даты
-    # # ip.plot(terminator=False, sat_trajectory=False, save=True, scatter=True, figsize=(8,4)) # нарисовать область на карте, покрываемую за какой-то пролёт
-    # # ip.plot_heatmap(bins=100, alpha=1, save=True, figsize=(8, 4), coastlines_color="white") # нарисовать карту суммарных длительностей пролётов
+    # ЕСЛИ ЧИТАЕШЬ СТАРЫЙ ФАЙЛ
+    ip = image_plotter(tles, sun, earth, dt=1, T=[0, 0, 11, 0], h=[5, 50], start_date=[2020, 5, 15, 12, 36, 35],
+                       sat_subpoint=True, full_sun=False)
+    big_df = pd.read_pickle("big_df_tianhe")
+    ip.read_df(big_df) # пример большого файла
+
+    # пример с выделением кусочка из большого файла
+    tz = timezone(timedelta(hours=0))  # whatever your timezone offset from UTC is
+    fb_df = big_df[(big_df["Date"] >= datetime(2021, 12, 27, 0, 0, 0, tzinfo=tz)) &
+                   (big_df["Date"] <= datetime(2021, 12, 28, 0, 0, 0, tzinfo=tz))]
+    # fb_df.iloc[::30, :]
+    ip.read_df(fb_df)
+
+    # a = ip.get_flyby_info(plot=True)
+    # ip.plot_duration(ylims=[10, 70], log_scale=False) # нарисовать график длительности пролетов в зависимости от даты
+    ip.plot(terminator=False, sat_trajectory=False, save=True, scatter=True, figsize=(8,4)) # нарисовать область на карте, покрываемую за какой-то пролёт
+    # ip.plot_heatmap(bins=100, alpha=1, save=True, figsize=(8, 4), coastlines_color="white") # нарисовать карту суммарных длительностей пролётов
+
+    # # ЕСЛИ СОБИРАЕШЬ БОЛЬШОЙ ФАЙЛ ИЗ НЕСКОЛЬКИХ ОДНОДНЕВНЫХ
+    # ip.save_big_dataframe(filename="big_df_tianhe")
+
+    # # ЕСЛИ НОВЫЙ РАСЧЁТ
+    # ip = image_plotter(tles, sun, earth, dt=1, T=[0, 0, 1, 0], h=[5, 50], start_date=[2021, 6, 12, 0, 0, 0], sat_subpoint=True, full_sun=False)
+    # # ip()
+    # ip.calculate_and_save_every_day(start=datetime(year=2021, month=6, day=12), total_days=365)
+    # # fb_info = ip.get_flyby_info()
+    # # print(fb_info)
+    # # ip.plot(sat_trajectory=True, scatter=True, terminator=True)
+
+    # ЕСЛИ БЫЛИ ПРОПУЩЕНЫ КАКИЕ-ТО ДАТЫ
+    # absent_dates = ip.find_absent_dates(start=datetime(year=2021, month=6, day=12), total_days=365, days_with_fbs_file="days_with_flybys.txt")
+    # ip.calculate_absent_dates(absent_dates)
 
 
-    # ЕСЛИ НОВЫЙ РАСЧЁТ
-    tle_parser = TLEArchiveParser("tianhe_tle_archive_parsed", "Tianhe_TLE.txt")
-    tles = tle_parser()
-
-    ip = image_plotter(tles, sun, earth, dt=10, T=[1, 0, 0, 0], h=[5, 50], start_date=[2021, 6, 12, 0, 0, 0], sat_subpoint=True, full_sun=False)
-    ip()
-    ip.calculate_and_save_every_day(start=datetime(year=2021, month=6, day=12), total_days=2)
-    # fb_info = ip.get_flyby_info()
-    # print(fb_info)
-    # ip.plot(sat_trajectory=True, scatter=True, terminator=True)
 
